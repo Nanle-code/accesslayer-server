@@ -25,6 +25,7 @@ import investorRouter from './investor/investor.routes';
 import followerRouter from './followers/follower.routes';
 import protocolRouter from './protocol/protocol.routes';
 import revenueRouter from './revenue/revenue.routes';
+import stakingRouter from './staking/staking.routes';
 import { BASE as CREATORS_BASE } from '../constants/creator.constants';
 
 const router = Router();
@@ -66,6 +67,7 @@ router.use('/vesting', routeBodySizeLimit('default'), vestingRouter);
 router.use('/investor', routeBodySizeLimit('default'), investorRouter);
 router.use('/followers', routeBodySizeLimit('default'), followerRouter);
 router.use('/protocol', routeBodySizeLimit('default'), protocolRouter);
+router.use('/staking', routeBodySizeLimit('default'), stakingRouter);
 router.use('/revenue', routeBodySizeLimit('default'), revenueRouter);
 
 export default router;
