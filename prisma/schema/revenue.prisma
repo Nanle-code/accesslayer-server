@@ -37,3 +37,36 @@ model RevenueClaim {
   @@unique([cycleId, wallet])
   @@index([wallet])
 }
+
+/// A protocol revenue distribution recorded from the
+/// protocol_revenue_distributed contract event (#875).
+model ProtocolRevenueDistribution {
+  id               String   @id @default(cuid())
+  distributionId   String   @unique
+  totalDistributed Decimal  @db.Decimal(20, 7)
+  stakerCount      Int
+  snapshotId       String
+  ledger           Int
+  txHash           String
+  distributedAt    DateTime
+  createdAt        DateTime @default(now())
+
+  shares           ProtocolRevenueShare[]
+
+  @@unique([ledger, txHash])
+  @@index([distributedAt(sort: Desc)])
+}
+
+/// The amount a single staker wallet received from a distribution (#875).
+model ProtocolRevenueShare {
+  id             String   @id @default(cuid())
+  distributionId String
+  wallet         String
+  amount         Decimal  @db.Decimal(20, 7)
+  createdAt      DateTime @default(now())
+
+  distribution   ProtocolRevenueDistribution @relation(fields: [distributionId], references: [id], onDelete: Cascade)
+
+  @@unique([distributionId, wallet])
+  @@index([wallet])
+}

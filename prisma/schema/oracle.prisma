@@ -1,0 +1,9 @@
+// prisma/schema/oracle.prisma
+
+/// External contract addresses approved to call the oracle (#873).
+model OracleCaller {
+  id        String   @id @default(cuid())
+  address   String   @unique
+  addedBy   String?
+  createdAt DateTime @default(now())
+}

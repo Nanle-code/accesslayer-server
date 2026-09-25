@@ -37,6 +37,10 @@ function isValidStellarAddress(address: string): boolean {
    return typeof address === 'string' && /^G[A-Z2-7]{55}$/.test(address);
 }
 
+function isValidStellarContractAddress(address: string): boolean {
+   return typeof address === 'string' && /^C[A-Z2-7]{55}$/.test(address);
+}
+
 const adminRouter = Router();
 
 adminRouter.patch('/creators/:id/metadata', httpUpdateCreatorMetadata);
@@ -162,6 +166,118 @@ adminRouter.post('/protocol/fee', adminGuard, async (req: AdminRequest, res, nex
       next(error);
    }
 });
+
+// ── Oracle approved callers ───────────────────────────────────
+
+/**
+ * GET /api/v1/admin/oracle/callers
+ * List all approved oracle caller addresses.
+ */
+adminRouter.get(
+   '/oracle/callers',
+   adminGuard,
+   async (_req: AdminRequest, res, next) => {
+      try {
+         const callers = await prisma.oracleCaller.findMany({
+            orderBy: { createdAt: 'desc' },
+         });
+         sendSuccess(
+            res,
+            callers.map(c => ({
+               address: c.address,
+               addedBy: c.addedBy,
+               createdAt: c.createdAt.toISOString(),
+            }))
+         );
+      } catch (error) {
+         logger.error({ error }, 'Oracle callers list failed');
+         next(error);
+      }
+   }
+);
+
+/**
+ * POST /api/v1/admin/oracle/callers
+ * Approve an external contract to call the oracle.
+ */
+adminRouter.post(
+   '/oracle/callers',
+   adminGuard,
+   async (req: AdminRequest, res, next) => {
+      const address = req.body?.address;
+      if (!isValidStellarContractAddress(address)) {
+         sendError(
+            res,
+            422,
+            ErrorCode.UNPROCESSABLE_ENTITY,
+            'Invalid contract address'
+         );
+         return;
+      }
+
+      try {
+         const existing = await prisma.oracleCaller.findUnique({
+            where: { address },
+         });
+         if (existing) {
+            sendConflict(res, 'Address is already an approved caller');
+            return;
+         }
+
+         // TODO: submit add_approved_caller contract call via Stellar SDK
+         // On-chain failure should return 502 before reaching this point.
+
+         const caller = await prisma.oracleCaller.create({
+            data: { address, addedBy: req.adminId },
+         });
+         sendSuccess(
+            res,
+            {
+               address: caller.address,
+               addedBy: caller.addedBy,
+               createdAt: caller.createdAt.toISOString(),
+            },
+            201
+         );
+      } catch (error) {
+         logger.error({ error }, 'Oracle caller add failed');
+         next(error);
+      }
+   }
+);
+
+/**
+ * DELETE /api/v1/admin/oracle/callers/:address
+ * Revoke an approved oracle caller.
+ */
+adminRouter.delete(
+   '/oracle/callers/:address',
+   adminGuard,
+   async (req: AdminRequest, res, next) => {
+      try {
+         const address = String(req.params.address);
+         const existing = await prisma.oracleCaller.findUnique({
+            where: { address },
+         });
+         if (!existing) {
+            sendNotFound(res, 'Oracle caller');
+            return;
+         }
+
+         // TODO: submit remove_approved_caller contract call via Stellar SDK
+         // On-chain failure should return 502 before reaching this point.
+
+         await prisma.oracleCaller.delete({ where: { address } });
+         sendSuccess(res, { address, removed: true });
+      } catch (error) {
+         logger.error(
+            { error, address: req.params.address },
+            'Oracle caller remove failed'
+         );
+         next(error);
+      }
+   }
+);
 
 // ── Timelock proposal management ──────────────────────────────
 

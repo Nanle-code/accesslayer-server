@@ -69,5 +69,7 @@ router.use('/followers', routeBodySizeLimit('default'), followerRouter);
 router.use('/protocol', routeBodySizeLimit('default'), protocolRouter);
 router.use('/staking', routeBodySizeLimit('default'), stakingRouter);
 router.use('/revenue', routeBodySizeLimit('default'), revenueRouter);
+router.use('/staker', routeBodySizeLimit('default'), stakerRouter);
+router.use('/portfolio', routeBodySizeLimit('default'), portfolioRouter);
 
 export default router;

@@ -33,6 +33,7 @@ import {
 import { prisma } from '../../utils/prisma.utils';
 import { logger } from '../../utils/logger.utils';
 import { invalidateCreatorDashboardCache } from '../creator/creator-dashboard.service';
+import { creatorProfileExists, getCreatorProfile } from '../creator/creator-profile.service';
 
 import { cacheGetJson, cacheSetJson } from '../../utils/redis.utils';
 import { fetchCreatorProfilesByIds } from '../../utils/creator-batch.utils';
@@ -53,8 +54,11 @@ import {
    MultisigVerificationError,
    processBuyback,
 } from './key-deprecation.service';
+import { getKeyCooldown } from './key-cooldown.service';
+import { StellarAddressSchema } from '../wallet/wallet.schemas';
 import {
    freezePosition,
+   getFreezeStatus,
    PositionAlreadyFrozenError,
    PositionNotFrozenError,
    PositionNotFoundError,
@@ -81,6 +85,10 @@ const searchQuerySchema = z.object({
 
 const batchKeysBodySchema = z.object({
    ids: z.array(z.string()).min(1, 'Empty array').max(20, 'More than 20 IDs'),
+});
+
+const walletQuerySchema = z.object({
+   wallet: StellarAddressSchema,
 });
 
 const router = Router();
@@ -180,6 +188,23 @@ router.get('/search', async (req, res, next) => {
          sendError(res, 400, ErrorCode.VALIDATION_ERROR, error.message);
          return;
       }
+      next(error);
+   }
+});
+
+/**
+ * GET /api/v1/keys/:keyId
+ * Public key detail response includes supply milestone metadata.
+ */
+router.get('/:keyId', async (req, res, next) => {
+   try {
+      const keyId = String(req.params.keyId);
+      if (!(await creatorProfileExists(keyId))) {
+         return sendNotFound(res, 'Key');
+      }
+      const profile = await getCreatorProfile(keyId);
+      sendSuccess(res, profile, 200, 'Key retrieved successfully');
+   } catch (error) {
       next(error);
    }
 });
@@ -384,6 +409,62 @@ router.get('/:keyId/twap', async (req: any, res: any, next: any) => {
 router.get('/:keyId/supply', async (req, res, next) => {
    try {
       sendSuccess(res, await getKeySupply(req.params.keyId));
+   } catch (error) {
+      if (error instanceof KeyNotFoundError) {
+         sendNotFound(res, 'Key');
+         return;
+      }
+      next(error);
+   }
+});
+
+/**
+ * GET /api/v1/keys/:keyId/freeze-status?wallet=
+ * Frozen and liquid balance for a holder on a key.
+ */
+router.get('/:keyId/freeze-status', async (req, res, next) => {
+   const parsed = walletQuerySchema.safeParse(req.query);
+   if (!parsed.success) {
+      sendValidationError(
+         res,
+         'Invalid query parameters',
+         zodIssuesToDetails(parsed.error.issues)
+      );
+      return;
+   }
+   try {
+      sendSuccess(
+         res,
+         await getFreezeStatus(String(req.params.keyId), parsed.data.wallet)
+      );
+   } catch (error) {
+      if (error instanceof KeyNotFoundError) {
+         sendNotFound(res, 'Key');
+         return;
+      }
+      next(error);
+   }
+});
+
+/**
+ * GET /api/v1/keys/:keyId/cooldown?wallet=
+ * Remaining buy cooldown for a wallet on a key.
+ */
+router.get('/:keyId/cooldown', async (req, res, next) => {
+   const parsed = walletQuerySchema.safeParse(req.query);
+   if (!parsed.success) {
+      sendValidationError(
+         res,
+         'Invalid query parameters',
+         zodIssuesToDetails(parsed.error.issues)
+      );
+      return;
+   }
+   try {
+      sendSuccess(
+         res,
+         await getKeyCooldown(String(req.params.keyId), parsed.data.wallet)
+      );
    } catch (error) {
       if (error instanceof KeyNotFoundError) {
          sendNotFound(res, 'Key');
@@ -703,6 +784,172 @@ router.post(
 );
 
 router.all('/:keyId/buyback', (_req, res) => {
+   res.set('Allow', 'POST').sendStatus(405);
+});
+
+// ── GET /:keyId/positions ─────────────────────────────────────
+// Returns the authenticated wallet's position for a key, including freeze
+// status (is_frozen / frozen_at). Requires a valid JWT.
+
+/**
+ * GET /api/v1/keys/:keyId/positions
+ *
+ * Returns the calling wallet's position on the given key including
+ * balance, cost basis, lockup expiry, and freeze status (#894).
+ */
+router.get(
+   '/:keyId/positions',
+   requireJwtAuth,
+   async (req: AuthenticatedRequest, res, next) => {
+      try {
+         const keyId = String(req.params.keyId);
+         const wallet = req.user!.wallet;
+
+         const creator = await prisma.creatorProfile.findFirst({
+            where: { OR: [{ id: keyId }, { handle: keyId }] },
+            select: { id: true },
+         });
+         if (!creator) {
+            sendNotFound(res, 'Key');
+            return;
+         }
+
+         const ownership = await prisma.keyOwnership.findUnique({
+            where: {
+               ownerAddress_creatorId: {
+                  ownerAddress: wallet,
+                  creatorId: creator.id,
+               },
+            },
+            select: {
+               id: true,
+               ownerAddress: true,
+               creatorId: true,
+               balance: true,
+               costBasis: true,
+               lastBuyAt: true,
+               lockupExpiresAt: true,
+               frozen: true,
+               frozenAt: true,
+               createdAt: true,
+               updatedAt: true,
+            },
+         });
+
+         if (!ownership) {
+            sendNotFound(res, 'Key position');
+            return;
+         }
+
+         sendSuccess(res, {
+            id: ownership.id,
+            ownerAddress: ownership.ownerAddress,
+            creatorId: ownership.creatorId,
+            balance: ownership.balance.toString(),
+            costBasis: ownership.costBasis?.toString() ?? '0',
+            lastBuyAt: ownership.lastBuyAt ?? null,
+            lockupExpiresAt: ownership.lockupExpiresAt ?? null,
+            is_frozen: ownership.frozen,
+            frozen_at: ownership.frozenAt ?? null,
+            createdAt: ownership.createdAt,
+            updatedAt: ownership.updatedAt,
+         });
+      } catch (error) {
+         logger.error(
+            { error, keyId: req.params.keyId },
+            'Get key position failed'
+         );
+         next(error);
+      }
+   }
+);
+
+router.all('/:keyId/positions', (_req, res) => {
+   res.set('Allow', 'GET').sendStatus(405);
+});
+
+// ── POST /:keyId/positions/freeze | /:keyId/positions/unfreeze ──────────────
+// Canonical position freeze paths per issue #894. These endpoints are
+// functionally identical to /:keyId/freeze and /:keyId/unfreeze but use
+// the /positions/ sub-resource path specified in the acceptance criteria.
+
+/**
+ * POST /api/v1/keys/:keyId/positions/freeze
+ * Freeze the authenticated wallet's position on a key. Audited (#894).
+ */
+router.post(
+   '/:keyId/positions/freeze',
+   requireJwtAuth,
+   async (req: AuthenticatedRequest, res, next) => {
+      try {
+         const result = await freezePosition(
+            String(req.params.keyId),
+            req.user!.wallet
+         );
+         sendSuccess(res, result, 201);
+      } catch (error) {
+         if (error instanceof KeyNotFoundError) {
+            sendNotFound(res, 'Key');
+            return;
+         }
+         if (error instanceof PositionNotFoundError) {
+            sendNotFound(res, 'Key position');
+            return;
+         }
+         if (error instanceof PositionAlreadyFrozenError) {
+            sendConflict(res, error.message);
+            return;
+         }
+         logger.error(
+            { error, keyId: req.params.keyId },
+            'Key position freeze failed'
+         );
+         next(error);
+      }
+   }
+);
+
+router.all('/:keyId/positions/freeze', (_req, res) => {
+   res.set('Allow', 'POST').sendStatus(405);
+});
+
+/**
+ * POST /api/v1/keys/:keyId/positions/unfreeze
+ * Release the freeze and restore trading/transfer ability. Audited (#894).
+ */
+router.post(
+   '/:keyId/positions/unfreeze',
+   requireJwtAuth,
+   async (req: AuthenticatedRequest, res, next) => {
+      try {
+         const result = await unfreezePosition(
+            String(req.params.keyId),
+            req.user!.wallet
+         );
+         sendSuccess(res, result, 200);
+      } catch (error) {
+         if (error instanceof KeyNotFoundError) {
+            sendNotFound(res, 'Key');
+            return;
+         }
+         if (error instanceof PositionNotFoundError) {
+            sendNotFound(res, 'Key position');
+            return;
+         }
+         if (error instanceof PositionNotFrozenError) {
+            sendConflict(res, error.message);
+            return;
+         }
+         logger.error(
+            { error, keyId: req.params.keyId },
+            'Key position unfreeze failed'
+         );
+         next(error);
+      }
+   }
+);
+
+router.all('/:keyId/positions/unfreeze', (_req, res) => {
    res.set('Allow', 'POST').sendStatus(405);
 });
 

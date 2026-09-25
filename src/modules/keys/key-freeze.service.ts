@@ -8,6 +8,7 @@
 // audit log.
 
 import { prisma } from '../../utils/prisma.utils';
+import { cacheGetJson, cacheSetJson } from '../../utils/redis.utils';
 import { emitAuditEvent } from '../../utils/audit.utils';
 import { createAuditEntry } from '../admin/audit-log.service';
 import { KeyNotFoundError } from './key-fees.service';
@@ -175,4 +176,59 @@ export async function unfreezePosition(
    });
 
    return { keyId: creator.id, wallet: walletAddress, frozen: false };
+}
+
+const FREEZE_STATUS_CACHE_TTL_SECONDS = 30;
+
+export interface FreezeStatus {
+   keyId: string;
+   wallet: string;
+   frozenQuantity: number;
+   liquidQuantity: number;
+}
+
+/**
+ * Frozen and liquid balance for a holder on a key (#871). A frozen position
+ * locks the whole balance; a wallet with no position or no freeze has a
+ * frozenQuantity of 0. Cached per (keyId, wallet) for 30 seconds.
+ */
+export async function getFreezeStatus(
+   keyId: string,
+   walletAddress: string
+): Promise<FreezeStatus> {
+   const cacheKey = `keys:freeze-status:${keyId}:${walletAddress}`;
+   const cached = await cacheGetJson<FreezeStatus>(cacheKey);
+   if (cached) {
+      return cached;
+   }
+
+   const creator = await prisma.creatorProfile.findFirst({
+      where: { OR: [{ id: keyId }, { handle: keyId }] },
+      select: { id: true },
+   });
+   if (!creator) {
+      throw new KeyNotFoundError(keyId);
+   }
+
+   const ownership = await prisma.keyOwnership.findUnique({
+      where: {
+         ownerAddress_creatorId: {
+            ownerAddress: walletAddress,
+            creatorId: creator.id,
+         },
+      },
+      select: { balance: true, frozen: true },
+   });
+
+   const totalBalance = Number(ownership?.balance ?? 0);
+   const frozenQuantity = ownership?.frozen ? totalBalance : 0;
+   const status: FreezeStatus = {
+      keyId: creator.id,
+      wallet: walletAddress,
+      frozenQuantity,
+      liquidQuantity: totalBalance - frozenQuantity,
+   };
+
+   await cacheSetJson(cacheKey, status, FREEZE_STATUS_CACHE_TTL_SECONDS);
+   return status;
 }

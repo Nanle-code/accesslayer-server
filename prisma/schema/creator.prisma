@@ -15,6 +15,8 @@ model CreatorProfile {
   supplyCap         Int?
   /// Number of keys that have been burned.
   burnedSupply      Int      @default(0)
+  /// Current milestone tier reached by supply.
+  currentMilestone  Int      @default(0) @map("current_milestone")
   /// Creator royalty charged on buys, in basis points (100 = 1%).
   creatorRoyaltyBuyBps  Int @default(0)
   /// Creator royalty charged on sells, in basis points (100 = 1%).
@@ -29,6 +31,8 @@ model CreatorProfile {
   buybackPriceXlm   Decimal?  @db.Decimal(20, 7)
   /// Buyback window expiry; buybacks are rejected with 410 after this time (#882).
   buybackExpiresAt  DateTime?
+  /// Buy cooldown between purchases by the same wallet, in ledgers (0 = no cooldown).
+  cooldownLedgers   Int      @default(0)
   perks             Json?
   followersCount    Int      @default(0)
   createdAt         DateTime @default(now())
